@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"  # This opens the website on port 8501
+    depends_on:
+      - api
+
+  # 1. API Service
+  api:
+    build: ./app
+    ports:
+      - "8000:80"
+    volumes:
+      - ./app:/code
+    depends_on:
+      - db
+      - broker
+
+  # 2. Worker Service
+  worker:
+    build: ./app
+    command: celery -A tasks worker --loglevel=info
+    volumes:
+      - ./app:/code
+    depends_on:
+      - db
+      - broker
+    environment:
+      - C_FORCE_ROOT=true
+
+  # 3. Database Service
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=echo_user
+      - POSTGRES_PASSWORD=echo_password
+      - POSTGRES_DB=echo_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 4. Message Broker Service
+  broker:
+    image: rabbitmq:3.12-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # 5. MinIO Storage Service
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minio_user
+      - MINIO_ROOT_PASSWORD=minio_password
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+
+# Shared Volumes (Storage Boxes)
+volumes:
+  postgres_data:
+  minio_data:
