@@ -12,6 +12,16 @@ Unlike simple synchronous applications that freeze during heavy processing, Echo
 
 ---
 
+🖼️ Project Demo
+
+### The Dashboard (Streamlit)
+*User uploads a file, waits for real-time processing, and views the AI-generated insights.*
+
+![Dashboard Screenshot] 
+![WhatsApp Image 2025-11-20 at 23 01 21_df82eca2](https://github.com/user-attachments/assets/78b463bd-f166-4ec9-b93c-bc98b477a3dc)
+
+---
+
 🏗️ System Architecture
 
 The system is containerized using **Docker** and orchestrates 6 interacting services to ensure scalability and fault tolerance.
