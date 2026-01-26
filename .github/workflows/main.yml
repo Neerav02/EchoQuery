@@ -33,15 +33,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpq-dev
 
-      - name: Install Dependencies (Lightweight Only)
+      - name: Install Dependencies (Lightweight)
         run: |
           python -m pip install --upgrade pip
           
-          # 1. Install Testing Tools
+          # Install Testing Tools
           pip install pytest httpx pytest-mock
           
-          # 2. Install API Tools MANUALLY (Skipping heavy AI libs)
-          # We do NOT use requirements.txt here because it contains torch/whisper
+          # Install ONLY API Tools (No heavy AI libs)
           pip install fastapi sqlalchemy boto3 uvicorn python-multipart psycopg2-binary
 
       - name: Run PyTest
@@ -49,5 +48,5 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/app
         run: |
           cd app
-          # The conftest.py we created will automatically block 'whisper' and 'transformers'
+          # Because of Lazy Imports in tasks.py, we don't need to mock anything!
           pytest -v

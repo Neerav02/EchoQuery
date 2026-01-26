@@ -1,8 +1,6 @@
 import time
 import os
 import boto3
-import whisper
-from transformers import pipeline 
 from celery_app import celery_app
 from database import SessionLocal
 import models
@@ -13,6 +11,12 @@ S3_BUCKET_NAME = "echo-bucket"
 def create_task(job_id):
     print(f"Worker: Starting Job {job_id}")
     db = SessionLocal()
+
+    # --- LAZY IMPORTS (The Fix) ---
+    # We import these HERE so they don't crash the API during testing
+    import whisper
+    from transformers import pipeline
+    # ------------------------------
 
     try:
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
@@ -39,7 +43,6 @@ def create_task(job_id):
         # 3. Summarize (Hugging Face)
         print("Worker: Running Summarization...")
         summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-        # Limit input to 1024 chars to prevent crashes on long audio
         input_text = transcript_text[:1024] 
         summary_result = summarizer(input_text, max_length=60, min_length=30, do_sample=False)
         summary_text = summary_result[0]['summary_text']
