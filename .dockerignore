@@ -1,0 +1,21 @@
+# Ignore version control
+.git
+.gitignore
+
+# Ignore local environment configs (Security Risk!)
+.env
+
+# Ignore Python cache (Speed up build)
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local virtual environments
+venv/
+env/
+.venv/
+
+# Ignore local data folders
+postgres_data/
+minio_data/
