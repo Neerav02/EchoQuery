@@ -28,30 +28,26 @@ jobs:
         with:
           python-version: "3.10"
 
-      # 1. Install System Libraries (FFmpeg is needed for Whisper)
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpq-dev ffmpeg
+          sudo apt-get install -y libpq-dev
 
-      # 2. Install Python Dependencies (Optimized)
-      - name: Install Python Dependencies
+      - name: Install Dependencies (Lightweight Only)
         run: |
           python -m pip install --upgrade pip
           
-          # Install Testing Tools
+          # 1. Install Testing Tools
           pip install pytest httpx pytest-mock
+          
+          # 2. Install API Tools MANUALLY (Skipping heavy AI libs)
+          # We do NOT use requirements.txt here because it contains torch/whisper
+          pip install fastapi sqlalchemy boto3 uvicorn python-multipart psycopg2-binary
 
-          # CRITICAL FIX: Install CPU-only version of PyTorch first (Small download)
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
-
-          # Install the rest of the app requirements (ignoring the 'torch' in the file since we just installed it)
-          pip install -r app/requirements.txt --no-cache-dir --prefer-binary
-
-      # 3. Run the Tests
       - name: Run PyTest
         env:
           PYTHONPATH: ${{ github.workspace }}/app
         run: |
           cd app
+          # The conftest.py we created will automatically block 'whisper' and 'transformers'
           pytest -v
