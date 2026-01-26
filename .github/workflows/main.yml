@@ -10,39 +10,37 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    # --- NEW SECTION: Fake Environment Variables ---
-    # This prevents the app from crashing when it can't find your real .env file
+    # We add quotes "" around values to prevent syntax errors
     env:
-      POSTGRES_USER: test_user
-      POSTGRES_PASSWORD: test_password
-      POSTGRES_DB: test_db
-      DATABASE_URL: sqlite:///:memory:  # Use memory DB for tests
-      MINIO_ROOT_USER: test_minio
-      MINIO_ROOT_PASSWORD: test_password
-      CELERY_BROKER_URL: amqp://guest:guest@localhost:5672//
+      POSTGRES_USER: "test_user"
+      POSTGRES_PASSWORD: "test_password"
+      POSTGRES_DB: "test_db"
+      DATABASE_URL: "sqlite:///:memory:"
+      MINIO_ROOT_USER: "test_minio"
+      MINIO_ROOT_PASSWORD: "test_password"
+      CELERY_BROKER_URL: "amqp://guest:guest@localhost:5672//"
 
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.10"
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v3
+        with:
+          python-version: "3.10"
 
-    # Added system library for Postgres
-    - name: Install System Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libpq-dev
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev
 
-    - name: Install Python Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pytest httpx pytest-mock sqlalchemy fastapi boto3 uvicorn celery python-multipart psycopg2
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest httpx pytest-mock sqlalchemy fastapi boto3 uvicorn celery python-multipart psycopg2
 
-    - name: Run PyTest
-      env:
-        PYTHONPATH: ${{ github.workspace }}/app
-      run: |
-        cd app
-        pytest
+      - name: Run PyTest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/app
+        run: |
+          cd app
+          pytest
