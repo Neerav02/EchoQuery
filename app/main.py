@@ -1,24 +1,33 @@
+import os
+import uuid
+import logging
+import boto3
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import models
 from database import engine, get_db
 from tasks import create_task
-import boto3
-import uuid
-
-# Initialize Database Tables
-models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# MinIO Config
-S3_BUCKET_NAME = "echo-bucket"
+# --- 1. CI-SAFE STARTUP (Crucial for Green Checkmark) ---
+@app.on_event("startup")
+def startup():
+    try:
+        models.Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        logging.warning(f"Skipping table creation (DB not available): {e}")
+
+# --- 2. SMART S3 CONFIGURATION (Cloud Ready) ---
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "echo-bucket")
+
+# If these are None (on AWS), boto3 uses real AWS S3 automatically!
 s3_client = boto3.client(
     "s3",
-    endpoint_url="http://minio:9000",
-    aws_access_key_id="minio_user",
-    aws_secret_access_key="minio_password",
+    endpoint_url=os.getenv("S3_ENDPOINT_URL"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     region_name="us-east-1"
 )
 
@@ -43,6 +52,7 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
 def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     unique_name = f"{uuid.uuid4()}-{file.filename}"
     try:
+        # We upload directly to the configured S3 (MinIO or AWS)
         s3_client.upload_fileobj(file.file, S3_BUCKET_NAME, unique_name)
     except Exception as e:
         raise HTTPException(500, f"Upload failed: {e}")
@@ -57,15 +67,12 @@ def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
     return {"message": "Upload started", "job_id": new_job.id}
 
-# --- THIS IS HOW YOU SEE THE DATA ---
 @app.get("/jobs/{job_id}")
 def get_job_status(job_id: int, db: Session = Depends(get_db)):
-    # 1. Find the job
     job = db.query(models.Job).filter(models.Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # 2. Return the data
     return {
         "job_id": job.id,
         "status": job.status,

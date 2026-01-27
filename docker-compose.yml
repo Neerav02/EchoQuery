@@ -2,67 +2,93 @@ version: '3.8'
 
 services:
 
-  frontend:
-    build: ./frontend
-    ports:
-      - "8501:8501"  # This opens the website on port 8501
-    depends_on:
-      - api
-
   # 1. API Service
   api:
     build: ./app
+    container_name: echo_api
     ports:
-      - "8000:80"
-    volumes:
-      - ./app:/code
+      - "8000:8000"
+    environment:
+      # Pass MinIO creds for Local Docker
+      AWS_ACCESS_KEY_ID: minio_user
+      AWS_SECRET_ACCESS_KEY: minio_password
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_NAME: echo-bucket
+      DATABASE_URL: postgresql://echo_user:echo_password@db:5432/echo_db
+      CELERY_BROKER_URL: amqp://guest:guest@broker:5672//
     depends_on:
-      - db
-      - broker
+      db:
+        condition: service_started
+      broker:
+        condition: service_started
+    volumes:
+      - ./app:/app
 
   # 2. Worker Service
   worker:
     build: ./app
-    command: celery -A tasks worker --loglevel=info
-    volumes:
-      - ./app:/code
+    container_name: echo_worker
+    command: celery -A tasks.celery_app worker --loglevel=info
+    environment:
+      # Pass MinIO creds for Local Docker
+      AWS_ACCESS_KEY_ID: minio_user
+      AWS_SECRET_ACCESS_KEY: minio_password
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_NAME: echo-bucket
+      DATABASE_URL: postgresql://echo_user:echo_password@db:5432/echo_db
+      CELERY_BROKER_URL: amqp://guest:guest@broker:5672//
     depends_on:
-      - db
-      - broker
-    environment:
-      - C_FORCE_ROOT=true
+      db:
+        condition: service_started
+      broker:
+        condition: service_started
+    volumes:
+      - ./app:/app
 
-  # 3. Database Service
-  db:
-    image: postgres:15
+  # 3. Frontend Service
+  frontend:
+    build: ./frontend
+    container_name: echo_frontend
+    ports:
+      - "8501:8501"
     environment:
-      - POSTGRES_USER=echo_user
-      - POSTGRES_PASSWORD=echo_password
-      - POSTGRES_DB=echo_db
+      API_URL: http://api:8000
+    depends_on:
+      - api
+
+  # 4. Database Service
+  db:
+    image: postgres:15-alpine
+    container_name: echo_db
+    environment:
+      POSTGRES_USER: echo_user
+      POSTGRES_PASSWORD: echo_password
+      POSTGRES_DB: echo_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # 4. Message Broker Service
+  # 5. Message Broker Service
   broker:
-    image: rabbitmq:3.12-management
+    image: rabbitmq:3.12-management-alpine
+    container_name: echo_broker
     ports:
       - "5672:5672"
       - "15672:15672"
 
-  # 5. MinIO Storage Service
+  # 6. MinIO Storage Service
   minio:
     image: minio/minio
+    container_name: echo_minio
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=minio_user
-      - MINIO_ROOT_PASSWORD=minio_password
+      MINIO_ROOT_USER: minio_user
+      MINIO_ROOT_PASSWORD: minio_password
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
 
-# Shared Volumes (Storage Boxes)
 volumes:
   postgres_data:
   minio_data:
