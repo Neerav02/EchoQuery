@@ -30,7 +30,7 @@ services:
         fromService:
           type: web
           name: echoquery-api
-          property: url
+          property: host
 
   # Redis Distributed Cache & Queue Broker
   - type: redis
