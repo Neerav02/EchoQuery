@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: echoquery
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echoquery-config
+  namespace: echoquery
+data:
+  DATABASE_URL: "postgresql://echo_user:echo_password@postgres-service:5432/echo_db"
+  REDIS_URL: "redis://redis-service:6379/0"
+  CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq-service:5672//"
+  CELERY_RESULT_BACKEND: "redis://redis-service:6379/1"
+  S3_BUCKET_NAME: "echo-bucket"

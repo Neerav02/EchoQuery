@@ -1,0 +1,109 @@
+# PostgreSQL Stateful Infrastructure
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: echoquery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - name: POSTGRES_USER
+          value: echo_user
+        - name: POSTGRES_PASSWORD
+          value: echo_password
+        - name: POSTGRES_DB
+          value: echo_db
+        ports:
+        - containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: echoquery
+spec:
+  ports:
+  - port: 5432
+  selector:
+    app: postgres
+---
+# Redis Distributed Lock & Cache
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: echoquery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: echoquery
+spec:
+  ports:
+  - port: 6379
+  selector:
+    app: redis
+---
+# RabbitMQ Message Broker + Dead Letter Queue
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: echoquery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3.12-management-alpine
+        ports:
+        - containerPort: 5672
+        - containerPort: 15672
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-service
+  namespace: echoquery
+spec:
+  ports:
+  - port: 5672
+    name: amqp
+  - port: 15672
+    name: management
+  selector:
+    app: rabbitmq

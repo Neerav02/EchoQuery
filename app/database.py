@@ -1,22 +1,20 @@
 import os
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# 1. Get the Database URL from the environment (with a default for Docker)
+# 1. Get Database URL from environment or default to local sqlite database for instant testing
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
-    "postgresql://user:password@db:5432/echo_db"
+    "sqlite:///./echo_local.db"
 )
 
-# 2. Configure the Engine
-# SQLite requires specific flags for testing (StaticPool keeps data in memory)
+# 2. Configure Engine
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         DATABASE_URL, 
         connect_args={"check_same_thread": False}, 
-        poolclass=StaticPool
+        poolclass=StaticPool if ":memory:" in DATABASE_URL else None
     )
 else:
     engine = create_engine(DATABASE_URL)

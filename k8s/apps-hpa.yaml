@@ -1,0 +1,102 @@
+# FastAPI Decoupled API Gateway
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echoquery-api
+  namespace: echoquery
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: echoquery-api
+  template:
+    metadata:
+      labels:
+        app: echoquery-api
+    spec:
+      containers:
+      - name: api
+        image: echoquery/api:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: echoquery-config
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echoquery-api-service
+  namespace: echoquery
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8000
+  selector:
+    app: echoquery-api
+---
+# Auto-Scaling Celery Compute Workers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echoquery-worker
+  namespace: echoquery
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: echoquery-worker
+  template:
+    metadata:
+      labels:
+        app: echoquery-worker
+    spec:
+      containers:
+      - name: worker
+        image: echoquery/api:latest
+        command: ["celery", "-A", "tasks.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+        envFrom:
+        - configMapRef:
+            name: echoquery-config
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2048Mi
+---
+# Horizontal Pod Autoscaler (HPA) for Zero-Downtime Worker Auto-Scaling
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: echoquery-worker-hpa
+  namespace: echoquery
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: echoquery-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
