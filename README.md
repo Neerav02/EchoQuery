@@ -1,5 +1,6 @@
 # ⚡ EchoQuery — Fault-Tolerant Distributed Task & AI Media Intelligence Engine
 
+[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-EchoQuery_Cloud-4F46E5?style=for-the-badge&logo=render&logoColor=white)](https://echoquery.onrender.com)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Redis](https://img.shields.io/badge/Redis-Redlock-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io)
@@ -8,6 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
 > **Decoupled Asynchronous Compute Gateway | Redis Distributed Locking | RabbitMQ Dead Letter Queue | Real-Time WebSocket Streaming | 99.99% Operational SLA**
+
+🌐 **Live Production Demo**: [https://echoquery.onrender.com](https://echoquery.onrender.com)
 
 EchoQuery is a production-grade distributed task processing engine built to solve high-load backend API bottlenecks. By decoupling heavy compute operations (such as speech-to-text transcription, NLP video analysis, and multi-modal summarization) from the synchronous HTTP request layer, EchoQuery reduces API response latency by 40% and delivers sub-second execution speeds (<950ms) under production workloads.
 
