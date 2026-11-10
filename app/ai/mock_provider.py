@@ -74,3 +74,4 @@ class MockAIProvider(BaseAIProvider):
             segments=segments,
             skills=skills
         )
+

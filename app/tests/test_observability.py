@@ -77,3 +77,4 @@ def test_system_stats_redis_caching(mocker):
         data = res.json()
         assert data["total_tasks_processed"] == 500
         fake_redis.get.assert_called_once_with("cache:system_stats")
+

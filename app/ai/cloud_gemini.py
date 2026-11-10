@@ -135,3 +135,4 @@ class CloudGeminiProvider(BaseAIProvider):
             segments=[],
             skills=parsed.get("skills", ["Google Gemini", "Audio Processing"])
         )
+

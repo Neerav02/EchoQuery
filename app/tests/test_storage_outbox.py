@@ -236,3 +236,4 @@ def test_storage_streaming_and_scratch_cleanup():
     # Clean up scratch file
     os.unlink(tmp_path)
     assert not os.path.exists(tmp_path)
+

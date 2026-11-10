@@ -106,3 +106,4 @@ class CloudOpenAIProvider(BaseAIProvider):
             segments=segments,
             skills=skills
         )
+

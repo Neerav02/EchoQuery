@@ -51,3 +51,4 @@ class BaseAIProvider(ABC):
     def model_name(self) -> str:
         """Configured model name."""
         pass
+

@@ -167,3 +167,4 @@ def test_router_unhealthy_fallback_raises_error(dummy_audio_file):
     
     with pytest.raises(RuntimeError, match="Both primary AI provider .* and fallback provider .* are unavailable"):
         router.transcribe_and_analyze(dummy_audio_file)
+

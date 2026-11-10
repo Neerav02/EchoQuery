@@ -82,3 +82,4 @@ def fetch_stream_history(job_id: int, last_event_id: Optional[str] = None) -> Li
         events.append(ev)
 
     return events
+

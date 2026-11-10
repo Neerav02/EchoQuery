@@ -88,3 +88,4 @@ def test_full_end_to_end_media_processing_pipeline(mocker):
         # Invalid token returns 401 or 403
         unauth_res = client.get(f"/jobs/{job_id}", headers=foreign_headers)
         assert unauth_res.status_code in (401, 403)
+

@@ -163,3 +163,4 @@ class LocalWhisperProvider(BaseAIProvider):
             segments=segments,
             skills=["Local AI", "Whisper", "Edge Inference"]
         )
+

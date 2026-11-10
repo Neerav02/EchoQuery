@@ -88,3 +88,4 @@ def test_local_whisper_missing_file_raises():
     provider = LocalWhisperProvider()
     with pytest.raises(FileNotFoundError):
         provider.transcribe_and_analyze("/non/existent/path/to/missing_file.wav")
+

@@ -103,3 +103,4 @@ def test_email_service_dispatch():
         exec_time_ms=750.0
     )
     assert success is True
+
