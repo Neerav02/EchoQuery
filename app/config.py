@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = "minio_password"
     AWS_REGION: str = "us-east-1"
     
+    # AI Providers
+    AI_PRIMARY_PROVIDER: str = "mock"  # "mock", "openai", "gemini", "local_whisper"
+    AI_FALLBACK_PROVIDER: Optional[str] = "mock"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_AUDIO_MODEL: str = "whisper-1"
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    WHISPER_MODEL_SIZE: str = "base"
+    WHISPER_DEVICE: str = "auto"
+    
     @property
     def cors_origins(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
