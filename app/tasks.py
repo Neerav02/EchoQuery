@@ -13,51 +13,27 @@ import models
 from redis_lock import distributed_lock
 from storage import download_file_to_temp
 from email_service import send_job_completion_email
+from ai.router import default_router
+from events import publish_job_event
 
 logger = logging.getLogger("echoquery.tasks")
 
 def analyze_media_content(filename: str, local_path: str = None) -> dict:
     """
-    Simulates / runs AI speech recognition and NLP summarization.
-    Takes optional local_path to ground analysis in downloaded storage file.
+    Delegates speech recognition and analytical summarization to HybridAIRouter.
+    Returns structured dictionary conforming to job schema.
     """
-    clean_name = filename.split(".")[0].replace("_", " ").replace("-", " ").title()
-    
-    if "resume" in filename.lower() or "neerav" in filename.lower() or "video" in filename.lower():
-        transcript = (
-            f"Hello and welcome! My name is {clean_name.split(' Video')[0]}. "
-            "I am a Senior Backend and Systems Engineer specializing in distributed architectures, "
-            "high-load asynchronous processing, Python, FastAPI, Redis distributed locking, and Kubernetes orchestrations. "
-            "In my recent work on EchoQuery, I architected a fault-tolerant task engine that decoupled compute-heavy tasks from the API layer, "
-            "cutting response latency by 40% while sustaining 99.99% uptime under production loads. "
-            "I built zero-write-conflict distributed locking with Redis Redlock and zero-data-loss Dead Letter Queues with exponential backoff retries. "
-            "Thank you for reviewing my profile and video presentation!"
-        )
-        summary = (
-            f"Candidate Profile Analysis ({clean_name}): Demonstrates high proficiency in distributed task queues, "
-            "asynchronous system design, FastAPI, Redis distributed locking, RabbitMQ DLQ, and Kubernetes auto-scaling (HPA). "
-            "Strong focus on system latency optimization (40% latency reduction) and high-availability architecture (99.99% uptime SLA)."
-        )
-        sentiment = "POSITIVE (98.4% confidence)"
-        skills = ["Python / FastAPI", "Redis Distributed Lock", "RabbitMQ + DLQ", "Kubernetes (HPA)", "System Design"]
-    else:
-        transcript = (
-            f"Audio analysis session recording for '{filename}'. "
-            "The technical presentation discusses distributed queue architectures, compute decoupling, and microservices resilience. "
-            "Key topics covered include fault-tolerance mechanisms, state synchronization across worker clusters, and automated recovery pipelines."
-        )
-        summary = (
-            f"Executive Analysis ({clean_name}): Technical discussion focusing on distributed systems resiliency, "
-            "asynchronous task execution, zero data loss guarantees, and auto-scaling worker pools."
-        )
-        sentiment = "NEUTRAL (92.1% confidence)"
-        skills = ["Distributed Computing", "Async Architecture", "Performance Tuning"]
-        
+    target_path = local_path if local_path and os.path.exists(local_path) else filename
+    ai_result = default_router.transcribe_and_analyze(target_path)
     return {
-        "transcript": transcript,
-        "summary": summary,
-        "sentiment": sentiment,
-        "skills": skills
+        "transcript": ai_result.transcript,
+        "summary": ai_result.summary,
+        "sentiment": ai_result.sentiment,
+        "skills": ai_result.skills,
+        "segments": ai_result.segments,
+        "provider": ai_result.provider,
+        "model_name": ai_result.model_name,
+        "token_usage": (ai_result.input_tokens or 0) + (ai_result.output_tokens or 0)
     }
 
 def execute_job_compute_logic(job_id: int, user_email: str = None):
@@ -67,7 +43,8 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
     1. Redis distributed lock with ownership token.
     2. Atomic database state claim (PENDING -> PROCESSING).
     3. Ephemeral MinIO file download and scratch cleanup.
-    4. DLQ transition upon exhausting max retries.
+    4. Real-time Pub/Sub and stream event publishing.
+    5. DLQ transition upon exhausting max retries.
     """
     start_time = time.time()
     db = SessionLocal()
@@ -91,7 +68,6 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
             db.commit()
 
             if result.rowcount == 0:
-                # Task was already claimed or is not in PENDING state
                 existing = db.query(models.Job).filter(models.Job.id == job_id).first()
                 if existing:
                     logger.info(f"Job #{job_id} already in status '{existing.status}'. Skipping duplicate execution.")
@@ -101,6 +77,9 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
             if not job:
                 return "Job not found"
 
+            # Broadcast status transition to WebSocket clients
+            publish_job_event(job.id, "JOB_STATUS", {"status": "PROCESSING", "filename": job.filename})
+
             # 2. Ephemeral Storage Retrieval from MinIO / S3
             if job.storage_name:
                 try:
@@ -109,20 +88,41 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
                 except Exception as s3_err:
                     logger.warning(f"Could not retrieve media file from storage for Job #{job_id}: {s3_err}")
 
-            # 3. Media Content Analysis
-            time.sleep(0.3)  # Processing simulation for prototype/test
+            # 3. Hybrid AI Inference Execution
             analysis = analyze_media_content(job.filename, local_path=tmp_scratch_file)
+
+            # Stream individual transcription segments
+            for seg in analysis.get("segments", []):
+                publish_job_event(job.id, "TRANSCRIPT_SEGMENT", seg)
+
+            # Stream summarization delta
+            publish_job_event(job.id, "SUMMARY_DELTA", {
+                "summary": analysis["summary"],
+                "sentiment": analysis["sentiment"],
+                "skills": analysis["skills"]
+            })
+
             elapsed_time = (time.time() - start_time) * 1000  # ms
 
             # 4. Atomic Completion Persistence
             job.transcript = analysis["transcript"]
             job.summary = analysis["summary"]
             job.sentiment = analysis["sentiment"]
+            job.ai_provider = analysis.get("provider")
+            job.ai_model = analysis.get("model_name")
+            job.token_usage = analysis.get("token_usage")
             job.status = "COMPLETED"
             job.execution_time_ms = round(elapsed_time, 2)
             job.lock_acquired = False
             job.error_message = None
             db.commit()
+
+            # Broadcast completion event
+            publish_job_event(job.id, "JOB_STATUS", {
+                "status": "COMPLETED",
+                "execution_time_ms": job.execution_time_ms,
+                "provider": job.ai_provider
+            })
 
             if user_email:
                 try:
@@ -150,9 +150,11 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
                     if job.retry_count >= job.max_retries:
                         job.status = "DEAD_LETTER"
                         job.is_dlq = True
+                        publish_job_event(job.id, "JOB_STATUS", {"status": "DEAD_LETTER", "error": job.error_message})
                         logger.error(f"Job #{job_id} permanently failed after {job.retry_count} attempts. Diverted to DLQ.")
                     else:
                         job.status = "FAILED"
+                        publish_job_event(job.id, "JOB_STATUS", {"status": "FAILED", "error": job.error_message})
                     db.commit()
             except Exception as update_err:
                 logger.error(f"Failed to record error state for Job #{job_id}: {update_err}")

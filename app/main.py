@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import (
-    FastAPI, Depends, HTTPException, UploadFile, File, Form, Header,
+    FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Query,
     WebSocket, WebSocketDisconnect, BackgroundTasks, status, Request
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,7 @@ from config import settings
 from redis_lock import distributed_lock, get_redis_client
 from storage import upload_file_stream
 from outbox import enqueue_outbox_task, dispatch_single_task, outbox_relay
+from events import fetch_stream_history
 from security import (
     hash_password, verify_and_migrate_password,
     create_access_token, create_refresh_token, decode_token,
@@ -525,12 +526,51 @@ def replay_dlq(job_id: int, background_tasks: BackgroundTasks, admin: models.Use
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to dispatch replay task: {e}")
 
 @app.websocket("/ws/stream/{job_id}")
-async def websocket_stream_endpoint(websocket: WebSocket, job_id: str):
+async def websocket_stream_endpoint(
+    websocket: WebSocket, 
+    job_id: str, 
+    last_event_id: Optional[str] = Query(None)
+):
     await manager.connect(websocket, job_id)
     try:
-        sample_tokens = ["Analyzing", " audio", " compute", " payload...", " Decoupling", " API", " layer...", " Latency", " reduced", " by", " 40%.", " Execution", " Complete."]
-        for token in sample_tokens:
-            await asyncio.sleep(0.1)
-            await websocket.send_json({"token": token, "job_id": job_id})
-    except WebSocketDisconnect:
+        numeric_id = int(job_id) if job_id.isdigit() else 0
+        
+        # 1. Replay historical stream events for reconnect catch-up
+        if numeric_id > 0:
+            history = fetch_stream_history(numeric_id, last_event_id=last_event_id)
+            for event in history:
+                await websocket.send_json(event)
+
+        # 2. Redis Pub/Sub live subscriber with fallback
+        client = get_redis_client()
+        if client and numeric_id > 0:
+            pubsub = client.pubsub()
+            pubsub.subscribe(f"job_events:{numeric_id}")
+            try:
+                while True:
+                    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+                    if message and message.get("type") == "message":
+                        data = json.loads(message["data"])
+                        await websocket.send_json(data)
+                        if data.get("event_type") == "JOB_STATUS" and data.get("data", {}).get("status") in ("COMPLETED", "DEAD_LETTER", "FAILED"):
+                            break
+                    await asyncio.sleep(0.05)
+            finally:
+                try:
+                    pubsub.unsubscribe(f"job_events:{numeric_id}")
+                    pubsub.close()
+                except Exception:
+                    pass
+        else:
+            # Fallback simulated token stream for dev/test without live Redis
+            sample_tokens = ["Analyzing", " audio", " payload...", " Processing", " AI", " transcription...", " Complete."]
+            for token in sample_tokens:
+                await asyncio.sleep(0.05)
+                await websocket.send_json({
+                    "event_type": "SUMMARY_DELTA",
+                    "job_id": numeric_id,
+                    "data": {"token": token}
+                })
+
+    except (WebSocketDisconnect, Exception):
         manager.disconnect(websocket, job_id)
