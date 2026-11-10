@@ -10,7 +10,7 @@ DATABASE_URL = settings.effective_database_url
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         DATABASE_URL, 
-        connect_args={"check_same_thread": False}, 
+        connect_args={"check_same_thread": False, "timeout": 30}, 
         poolclass=StaticPool if ":memory:" in DATABASE_URL else None
     )
 else:
