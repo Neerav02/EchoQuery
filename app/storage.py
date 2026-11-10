@@ -2,8 +2,11 @@ import os
 import logging
 import tempfile
 import shutil
+import socket
+from urllib.parse import urlparse
 from typing import Optional, BinaryIO
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 logger = logging.getLogger("echoquery.storage")
@@ -21,12 +24,18 @@ def get_s3_client():
     global _s3_client
     if _s3_client is None:
         try:
+            s3_config = Config(
+                connect_timeout=0.5,
+                read_timeout=1.0,
+                retries={"max_attempts": 1}
+            )
             _s3_client = boto3.client(
                 "s3",
                 endpoint_url=S3_ENDPOINT_URL,
                 aws_access_key_id=AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
                 region_name=AWS_REGION,
+                config=s3_config
             )
         except Exception as e:
             logger.warning(f"Failed to initialize S3 client: {e}")
@@ -34,15 +43,25 @@ def get_s3_client():
     return _s3_client
 
 def is_storage_available() -> bool:
-    """Verifies whether the S3/MinIO service is reachable."""
+    """Verifies whether the S3/MinIO service is reachable using fast socket probe."""
+    try:
+        parsed = urlparse(S3_ENDPOINT_URL)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 9000
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect((host, port))
+        s.close()
+    except Exception:
+        return False
+
     client = get_s3_client()
     if not client:
         return False
     try:
         client.list_buckets()
         return True
-    except (ClientError, EndpointConnectionError, Exception) as e:
-        logger.debug(f"S3/MinIO connection check failed: {e}")
+    except Exception:
         return False
 
 def ensure_bucket_exists(bucket_name: Optional[str] = None) -> bool:
@@ -83,21 +102,22 @@ def upload_file_stream(file_obj: BinaryIO, storage_name: str, bucket_name: Optio
     Falls back to local file storage if S3/MinIO is unreachable.
     """
     bucket = bucket_name or S3_BUCKET_NAME
-    client = get_s3_client()
 
     extra_args = {}
     if content_type:
         extra_args["ContentType"] = content_type
 
-    if client and is_storage_available():
-        try:
-            ensure_bucket_exists(bucket)
-            file_obj.seek(0)
-            client.upload_fileobj(file_obj, bucket, storage_name, ExtraArgs=extra_args if extra_args else None)
-            logger.info(f"Uploaded '{storage_name}' to S3 bucket '{bucket}'.")
-            return storage_name
-        except Exception as e:
-            logger.warning(f"S3 upload failed for '{storage_name}': {e}. Falling back to local storage.")
+    if is_storage_available():
+        client = get_s3_client()
+        if client:
+            try:
+                ensure_bucket_exists(bucket)
+                file_obj.seek(0)
+                client.upload_fileobj(file_obj, bucket, storage_name, ExtraArgs=extra_args if extra_args else None)
+                logger.info(f"Uploaded '{storage_name}' to S3 bucket '{bucket}'.")
+                return storage_name
+            except Exception as e:
+                logger.warning(f"S3 upload failed for '{storage_name}': {e}. Falling back to local storage.")
 
     # Local fallback
     os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
@@ -115,21 +135,22 @@ def download_file_to_temp(storage_name: str, bucket_name: Optional[str] = None) 
     The caller is responsible for deleting the temp file after use.
     """
     bucket = bucket_name or S3_BUCKET_NAME
-    client = get_s3_client()
 
     suffix = os.path.splitext(storage_name)[1] or ".bin"
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = temp_file.name
     temp_file.close()
 
-    # Try downloading from S3/MinIO first
-    if client and is_storage_available():
-        try:
-            client.download_file(bucket, storage_name, temp_path)
-            logger.info(f"Downloaded '{storage_name}' from S3 bucket '{bucket}' to temp: {temp_path}")
-            return temp_path
-        except Exception as e:
-            logger.warning(f"Could not download '{storage_name}' from S3: {e}. Checking local storage fallback.")
+    # Try downloading from S3/MinIO first if available
+    if is_storage_available():
+        client = get_s3_client()
+        if client:
+            try:
+                client.download_file(bucket, storage_name, temp_path)
+                logger.info(f"Downloaded '{storage_name}' from S3 bucket '{bucket}' to temp: {temp_path}")
+                return temp_path
+            except Exception as e:
+                logger.warning(f"Could not download '{storage_name}' from S3: {e}. Checking local storage fallback.")
 
     # Check local fallback directory
     local_source = os.path.join(LOCAL_STORAGE_DIR, storage_name)
@@ -143,15 +164,16 @@ def download_file_to_temp(storage_name: str, bucket_name: Optional[str] = None) 
 def delete_file(storage_name: str, bucket_name: Optional[str] = None) -> bool:
     """Deletes the media object from S3 and local storage."""
     bucket = bucket_name or S3_BUCKET_NAME
-    client = get_s3_client()
     success = False
 
-    if client and is_storage_available():
-        try:
-            client.delete_object(Bucket=bucket, Key=storage_name)
-            success = True
-        except Exception as e:
-            logger.warning(f"Failed to delete '{storage_name}' from S3: {e}")
+    if is_storage_available():
+        client = get_s3_client()
+        if client:
+            try:
+                client.delete_object(Bucket=bucket, Key=storage_name)
+                success = True
+            except Exception as e:
+                logger.warning(f"Failed to delete '{storage_name}' from S3: {e}")
 
     local_path = os.path.join(LOCAL_STORAGE_DIR, storage_name)
     if os.path.exists(local_path):
@@ -162,4 +184,3 @@ def delete_file(storage_name: str, bucket_name: Optional[str] = None) -> bool:
             logger.warning(f"Failed to delete local fallback '{local_path}': {e}")
 
     return success
-

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import (
-    FastAPI, Depends, HTTPException, UploadFile, File, Form, 
+    FastAPI, Depends, HTTPException, UploadFile, File, Form, Header,
     WebSocket, WebSocketDisconnect, BackgroundTasks, status, Request
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +27,7 @@ from tasks import create_task, replay_dlq_task, execute_job_compute_logic
 from config import settings
 from redis_lock import distributed_lock, get_redis_client
 from storage import upload_file_stream
+from outbox import enqueue_outbox_task, dispatch_single_task, outbox_relay
 from security import (
     hash_password, verify_and_migrate_password,
     create_access_token, create_refresh_token, decode_token,
@@ -61,7 +62,17 @@ async def lifespan(app: FastAPI):
         logger.info("Database tables initialized successfully.")
     except Exception as e:
         logger.warning(f"Skipping table creation: {e}")
+    if settings.ENVIRONMENT != "test":
+        try:
+            outbox_relay.start()
+        except Exception as e:
+            logger.warning(f"Could not start OutboxRelay: {e}")
     yield
+    if settings.ENVIRONMENT != "test":
+        try:
+            outbox_relay.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping OutboxRelay: {e}")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -350,17 +361,33 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/upload/")
 async def upload_file(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
     email: Optional[str] = Form(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     current_user: models.User = Depends(require_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Authenticated media upload:
-    Streams file bytes directly to MinIO, persists Job with user ownership,
-    and dispatches execution task.
+    Authenticated media upload with database-backed idempotency & Transactional Outbox:
+    - Streams file directly to MinIO
+    - Prevents duplicate job execution via idempotency_key
+    - Persists Job and OutboxTask in a single atomic transaction
+    - Dispatches to broker reliably without using in-process BackgroundTasks fallback
     """
+    if idempotency_key:
+        existing_job = db.query(models.Job).filter(models.Job.idempotency_key == idempotency_key).first()
+        if existing_job:
+            # Check ownership
+            if existing_job.user_id != current_user.id and not current_user.is_superuser:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this idempotent job")
+            return {
+                "message": "Task already registered (idempotent replay)",
+                "job_id": existing_job.id,
+                "status": existing_job.status,
+                "latency_decoupled": True,
+                "is_duplicate": True
+            }
+
     unique_name = f"{uuid.uuid4()}-{file.filename}"
     
     # Stream uploaded file to MinIO / local fallback storage
@@ -369,28 +396,32 @@ async def upload_file(
     except Exception as e:
         logger.warning(f"File upload to primary storage encountered warning: {e}")
 
+    # Atomic transaction: Job + OutboxTask
     new_job = models.Job(
         user_id=current_user.id,
         filename=file.filename, 
         storage_name=unique_name,
         storage_bucket=settings.S3_BUCKET_NAME,
-        status="PENDING"
+        status="PENDING",
+        idempotency_key=idempotency_key
     )
     db.add(new_job)
+    db.flush()
+
+    outbox_task = enqueue_outbox_task(
+        db=db,
+        job_id=new_job.id,
+        topic="tasks.create_task",
+        payload={"job_id": new_job.id, "email": email or current_user.email}
+    )
     db.commit()
     db.refresh(new_job)
     
-    # Single execution path: Celery worker queue if broker is up, otherwise local BackgroundTasks
+    # Attempt immediate dispatch if broker is reachable
     if is_broker_available():
-        try:
-            create_task.delay(new_job.id, email or current_user.email)
-            logger.info(f"Job #{new_job.id} dispatched to Celery worker queue.")
-        except Exception as e:
-            logger.warning(f"Failed to queue in Celery: {e}. Falling back to local BackgroundTasks.")
-            background_tasks.add_task(execute_job_compute_logic, new_job.id, email or current_user.email)
+        dispatch_single_task(outbox_task, db)
     else:
-        logger.info(f"Broker offline. Job #{new_job.id} executing via local BackgroundTasks.")
-        background_tasks.add_task(execute_job_compute_logic, new_job.id, email or current_user.email)
+        logger.info(f"Broker offline. Job #{new_job.id} durably queued in OutboxTask #{outbox_task.id} for relay upon recovery.")
 
     return {
         "message": "Async task queued successfully",
