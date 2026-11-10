@@ -1,6 +1,7 @@
 import sys
 import os
 import uuid
+import json
 import logging
 import asyncio
 import time
@@ -15,6 +16,7 @@ from fastapi import (
     FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Query,
     WebSocket, WebSocketDisconnect, BackgroundTasks, status, Request
 )
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -90,6 +92,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def correlation_id_and_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start_time = time.time()
+    
+    response = await call_next(request)
+    
+    duration_ms = round((time.time() - start_time) * 1000, 2)
+    response.headers["X-Request-ID"] = request_id
+    logger.info(f"[{request_id}] {request.method} {request.url.path} - {response.status_code} ({duration_ms}ms)")
+    return response
 
 # --- Authentication Dependencies ---
 
@@ -466,6 +481,18 @@ def get_job_status(
 
 @app.get("/system/stats")
 def get_system_stats(db: Session = Depends(get_db)):
+    """System statistics with 5-second Redis caching to mitigate dashboard load storms."""
+    redis_client = get_redis_client()
+    cache_key = "cache:system_stats"
+    
+    if redis_client:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.warning(f"Stats cache read error: {e}")
+
     total_jobs = db.query(models.Job).count()
     completed_jobs = db.query(models.Job).filter(models.Job.status == "COMPLETED").count()
     failed_jobs = db.query(models.Job).filter(models.Job.status == "FAILED").count()
@@ -473,7 +500,7 @@ def get_system_stats(db: Session = Depends(get_db)):
     
     avg_exec_time = db.query(func.avg(models.Job.execution_time_ms)).filter(models.Job.status == "COMPLETED").scalar() or 0.0
 
-    return {
+    stats_data = {
         "system_status": "99.99% Operational",
         "total_tasks_processed": total_jobs,
         "completed_tasks": completed_jobs,
@@ -483,6 +510,36 @@ def get_system_stats(db: Session = Depends(get_db)):
         "avg_worker_execution_ms": round(avg_exec_time, 2),
         "distributed_lock_status": "ACTIVE (Redis Redlock)"
     }
+
+    if redis_client:
+        try:
+            redis_client.set(cache_key, json.dumps(stats_data), ex=5)
+        except Exception as e:
+            logger.warning(f"Stats cache write error: {e}")
+
+    return stats_data
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics(db: Session = Depends(get_db)):
+    """Prometheus-compatible plaintext metrics endpoint."""
+    total_jobs = db.query(models.Job).count()
+    completed_jobs = db.query(models.Job).filter(models.Job.status == "COMPLETED").count()
+    failed_jobs = db.query(models.Job).filter(models.Job.status == "FAILED").count()
+    dlq_jobs = db.query(models.Job).filter(models.Job.is_dlq == True).count()
+    avg_exec = db.query(func.avg(models.Job.execution_time_ms)).filter(models.Job.status == "COMPLETED").scalar() or 0.0
+
+    lines = [
+        "# HELP echoquery_tasks_total Total count of processed tasks",
+        "# TYPE echoquery_tasks_total counter",
+        f'echoquery_tasks_total{{status="all"}} {total_jobs}',
+        f'echoquery_tasks_total{{status="completed"}} {completed_jobs}',
+        f'echoquery_tasks_total{{status="failed"}} {failed_jobs}',
+        f'echoquery_tasks_total{{status="dead_letter"}} {dlq_jobs}',
+        "# HELP echoquery_worker_execution_time_ms_avg Average worker execution time in milliseconds",
+        "# TYPE echoquery_worker_execution_time_ms_avg gauge",
+        f"echoquery_worker_execution_time_ms_avg {round(avg_exec, 2)}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 # --- Protected DLQ Administration Routes ---
 
