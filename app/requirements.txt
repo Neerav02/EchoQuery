@@ -10,6 +10,10 @@ python-multipart
 openai-whisper
 transformers
 torch
+bcrypt
+pyjwt
+pydantic-settings
+alembic
 pytest
 httpx
 pytest-mock

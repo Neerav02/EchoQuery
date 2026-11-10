@@ -2,14 +2,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
+from config import settings
 
-# 1. Get Database URL from environment or default to local sqlite database for instant testing
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "sqlite:///./echo_local.db"
-)
+DATABASE_URL = settings.effective_database_url
 
-# 2. Configure Engine
+# Configure Engine with production-grade capacity budgeting
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         DATABASE_URL, 
@@ -17,7 +14,14 @@ if DATABASE_URL.startswith("sqlite"):
         poolclass=StaticPool if ":memory:" in DATABASE_URL else None
     )
 else:
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=15,
+        pool_recycle=1800,
+        pool_pre_ping=True
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
