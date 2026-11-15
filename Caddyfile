@@ -1,0 +1,55 @@
+# EchoQuery Production Reverse Proxy Configuration
+# Caddy 2 - Automated TLS, WebSockets & HTTP/2 Reverse Proxy
+
+{$DOMAIN_NAME} {
+    # Production security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Reject localhost or direct IP requests in production
+    @forbidden_hosts {
+        header Host localhost* 127.0.0.1* [::1]*
+    }
+    respond @forbidden_hosts "Production reverse proxy requires a configured public domain." 400
+
+    # 1. FastAPI Real-Time WebSocket Streaming (/ws/*)
+    # Supports /ws/stream/{job_id} with long-lived streaming connections
+    handle /ws/* {
+        reverse_proxy api:8000 {
+            transport http {
+                response_header_timeout 86400s
+                read_timeout 86400s
+                write_timeout 86400s
+            }
+        }
+    }
+
+    # 2. FastAPI REST APIs, Health, Metrics & OpenAPI Documentation
+    @api_routes {
+        path /health /metrics /docs /redoc /openapi.json /auth/* /users/* /upload/* /jobs/* /dlq/* /system/*
+    }
+    handle @api_routes {
+        reverse_proxy api:8000
+    }
+
+    # 3. Dedicated /api/* Path Prefix (strips /api and proxies to FastAPI)
+    handle_path /api/* {
+        reverse_proxy api:8000
+    }
+
+    # 4. Streamlit Interactive UI & Streamlit Internal WebSockets (/_stcore/stream)
+    handle {
+        reverse_proxy frontend:8501 {
+            transport http {
+                response_header_timeout 86400s
+                read_timeout 86400s
+                write_timeout 86400s
+            }
+        }
+    }
+}
+

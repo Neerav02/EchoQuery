@@ -27,6 +27,45 @@ def get_optimal_device(requested_device: Optional[str] = None) -> Tuple[str, str
         return "cuda", "float16"
     return "cpu", "int8"
 
+def load_audio_waveform(audio_path: str) -> Any:
+    """
+    Attempts to read audio from a WAV file directly via Python's standard library
+    wave module, avoiding an external ffmpeg subprocess dependency when possible.
+    Falls back to the file path string if wave reading is inapplicable.
+    """
+    if not audio_path.lower().endswith(".wav"):
+        return audio_path
+    try:
+        import wave
+        import numpy as np
+        with wave.open(audio_path, "rb") as wf:
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            frames = wf.readframes(wf.getnframes())
+            if sampwidth == 2:
+                data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            elif sampwidth == 4:
+                data = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / 2147483648.0
+            else:
+                data = np.frombuffer(frames, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
+
+            if n_channels > 1:
+                data = data.reshape(-1, n_channels).mean(axis=1)
+
+            if framerate != 16000 and len(data) > 0:
+                target_len = int(len(data) * 16000 / framerate)
+                data = np.interp(
+                    np.linspace(0, len(data), target_len, endpoint=False),
+                    np.arange(len(data)),
+                    data
+                ).astype(np.float32)
+
+            return data
+    except Exception as e:
+        logger.debug(f"Could not load WAV directly via wave module: {e}. Falling back to file path.")
+        return audio_path
+
 class WhisperModelRegistry:
     """
     Process-level singleton registry that caches loaded Whisper models.
@@ -123,7 +162,8 @@ class LocalWhisperProvider(BaseAIProvider):
             raw_transcript = " ".join(seg_list).strip()
         else:
             # openai_whisper
-            res = model.transcribe(audio_path)
+            audio_input = load_audio_waveform(audio_path)
+            res = model.transcribe(audio_input, fp16=(self._device == "cuda"))
             raw_transcript = res.get("text", "").strip()
             for s in res.get("segments", []):
                 segments.append({

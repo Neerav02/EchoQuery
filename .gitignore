@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 venv/
 .env
+.env.production
+.env.prod
+.env.*
+!.env.example
+!.env.production.example
 *.db
 .pytest_cache/
 
@@ -18,3 +23,9 @@ minio_data/
 *.mp3
 *.mp4
 *.wav
+!app/tests/fixtures/*.wav
+
+# Keys and Backups
+*.key
+backups/
+.coverage

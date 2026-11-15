@@ -30,10 +30,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # 4. Install System Dependencies
-# We need 'curl' for the Healthcheck later
+# 'curl' for healthcheck, 'ffmpeg' for media audio processing & Whisper
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -version > /dev/null
 
 # 5. Create a non-root user 'appuser'
 # This is the "Unique/Pro" step recruiters love.
@@ -42,25 +44,35 @@ RUN useradd -m -r appuser
 # 6. Set work directory
 WORKDIR /app
 
-# 7. Install Dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 7. Upgrade base package managers for robust download resumption and wheel handling
+RUN pip install --no-cache-dir --default-timeout=1000 --retries 10 --upgrade pip setuptools wheel
 
-# 8. Copy Code & Change Ownership
+# 8. Install CPU-only PyTorch (Dedicated layer prevents CUDA packages and optimizes Docker caching)
+RUN pip install --no-cache-dir --default-timeout=1000 --retries 10 torch==2.14.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+
+# 9. Install application requirements (PyTorch dependencies resolve from PyPI; torch version preserved)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --default-timeout=1000 --retries 10 --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+# 10. Build-time verification (Pip consistency check, CPU-only verification, version & architecture verification)
+RUN python -m pip check \
+    && python -c "import torch, platform; print(f'=== Build-time Verification: PyTorch {torch.__version__} | CUDA: {torch.version.cuda} | Arch: {platform.machine()} ==='); assert torch.version.cuda is None, 'CUDA packages detected; expected CPU-only'; assert torch.__version__ == '2.14.1+cpu', f'Unexpected torch version: {torch.__version__}'; assert platform.machine() in ('aarch64', 'arm64', 'x86_64'), f'Unexpected architecture: {platform.machine()}'; print('=== Verification Passed: PyTorch CPU-only confirmed ===')"
+
+# 11. Copy Code & Change Ownership
 # We give 'appuser' permission to use this folder
 COPY . .
 RUN chown -R appuser:appuser /app
 
-# 9. Switch to non-root user
+# 12. Switch to non-root user
 USER appuser
 
-# 10. Expose Port
+# 13. Expose Port
 EXPOSE 8000
 
-# 11. Healthcheck (Self-Healing)
+# 14. Healthcheck (Self-Healing)
 # Docker will ping this every 30s. If it fails, it restarts the container.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/docs || exit 1
+  CMD curl -f http://localhost:8000/health || exit 1
 
-# 12. Run
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
+# 15. Run
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

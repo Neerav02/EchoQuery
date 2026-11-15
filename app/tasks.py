@@ -7,7 +7,10 @@ from sqlalchemy import update
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from celery_app import celery_app
+if "celery_app" in sys.modules or not __package__:
+    from celery_app import celery_app
+else:
+    from app.celery_app import celery_app
 from database import SessionLocal
 import models
 from redis_lock import distributed_lock
@@ -180,7 +183,22 @@ def execute_job_compute_logic(job_id: int, user_email: str = None):
     retry_backoff=True
 )
 def create_task(self, job_id: int, user_email: str = None):
-    return execute_job_compute_logic(job_id, user_email)
+    result = execute_job_compute_logic(job_id, user_email)
+    if result == "Failed":
+        db = SessionLocal()
+        try:
+            job = db.query(models.Job).filter(models.Job.id == job_id).first()
+            if job and not job.is_dlq and job.retry_count < job.max_retries:
+                err_msg = job.error_message or "Task execution failed"
+                job.status = "PENDING"
+                db.commit()
+                raise self.retry(
+                    exc=RuntimeError(err_msg),
+                    countdown=min(2 ** self.request.retries, 10),
+                )
+        finally:
+            db.close()
+    return result
 
 @celery_app.task(name="replay_dlq_task")
 def replay_dlq_task(job_id: int):

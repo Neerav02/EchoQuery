@@ -11,7 +11,16 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 
 logger = logging.getLogger("echoquery.storage")
 
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
+def get_s3_endpoint_url() -> str:
+    url = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
+    if "minio" in url:
+        try:
+            socket.gethostbyname("minio")
+        except socket.gaierror:
+            url = url.replace("://minio:", "://localhost:").replace("://minio", "://localhost:9000")
+    return url
+
+S3_ENDPOINT_URL = get_s3_endpoint_url()
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "minio_user")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "minio_password")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "echo-bucket")
@@ -24,6 +33,7 @@ def get_s3_client():
     global _s3_client
     if _s3_client is None:
         try:
+            endpoint = get_s3_endpoint_url()
             s3_config = Config(
                 connect_timeout=0.5,
                 read_timeout=1.0,
@@ -31,7 +41,7 @@ def get_s3_client():
             )
             _s3_client = boto3.client(
                 "s3",
-                endpoint_url=S3_ENDPOINT_URL,
+                endpoint_url=endpoint,
                 aws_access_key_id=AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
                 region_name=AWS_REGION,
@@ -45,11 +55,12 @@ def get_s3_client():
 def is_storage_available() -> bool:
     """Verifies whether the S3/MinIO service is reachable using fast socket probe."""
     try:
-        parsed = urlparse(S3_ENDPOINT_URL)
+        endpoint = get_s3_endpoint_url()
+        parsed = urlparse(endpoint)
         host = parsed.hostname or "localhost"
         port = parsed.port or 9000
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2)
+        s.settimeout(0.3)
         s.connect((host, port))
         s.close()
     except Exception:

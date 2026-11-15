@@ -24,7 +24,7 @@ from sqlalchemy import func
 from pydantic import BaseModel, ConfigDict, EmailStr
 
 import models
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 from tasks import create_task, replay_dlq_task, execute_job_compute_logic
 from config import settings
 from redis_lock import distributed_lock, get_redis_client
@@ -45,7 +45,8 @@ from contextlib import asynccontextmanager
 
 def is_broker_available() -> bool:
     """Verifies whether the AMQP broker host and port are reachable."""
-    broker_url = settings.CELERY_BROKER_URL
+    from celery_app import BROKER_URL
+    broker_url = BROKER_URL if isinstance(BROKER_URL, str) else settings.CELERY_BROKER_URL
     try:
         parsed = urlparse(broker_url)
         host = parsed.hostname or "localhost"
@@ -110,26 +111,52 @@ async def correlation_id_and_logging_middleware(request: Request, call_next):
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
-def get_current_user(token: Optional[str] = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[models.User]:
-    """Extracts and verifies the authenticated user from the JWT Bearer token."""
+def resolve_user_from_access_token(token: Optional[str], db: Session) -> Optional[models.User]:
+    """Validates a JWT access token (signature, type, revocation) and returns the User."""
     if not token:
         return None
     try:
         payload = decode_token(token)
         jti = payload.get("jti")
         token_type = payload.get("type")
-        
+
         if token_type != "access" or (jti and is_token_blacklisted(jti)):
             return None
-        
+
         user_id = payload.get("sub")
         if user_id is None:
             return None
-        
-        user = db.query(models.User).filter(models.User.id == int(user_id)).first()
-        return user
+
+        return db.query(models.User).filter(models.User.id == int(user_id)).first()
     except Exception:
         return None
+
+
+def can_access_job(job: models.Job, current_user: Optional[models.User]) -> bool:
+    """Checks whether current_user is authorized to view or stream a Job record."""
+    if current_user is None:
+        return False
+    if job.user_id is None:
+        return bool(current_user.is_superuser)
+    return job.user_id == current_user.id or bool(current_user.is_superuser)
+
+
+def _extract_websocket_token(websocket: WebSocket, query_token: Optional[str]) -> Optional[str]:
+    """Extracts Bearer token from WebSocket Authorization header or query parameter."""
+    auth_header = websocket.headers.get("authorization")
+    if auth_header:
+        scheme, _, credentials = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and credentials.strip():
+            return credentials.strip()
+        return None
+    if query_token and query_token.strip():
+        return query_token.strip()
+    return None
+
+
+def get_current_user(token: Optional[str] = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[models.User]:
+    """Extracts and verifies the authenticated user from the JWT Bearer token."""
+    return resolve_user_from_access_token(token, db)
 
 def require_current_user(current_user: Optional[models.User] = Depends(get_current_user)) -> models.User:
     """Enforces active authenticated session."""
@@ -355,6 +382,12 @@ def get_me(current_user: models.User = Depends(require_current_user)):
 @app.post("/users/", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
     """Registers a new user with secure Bcrypt password hashing."""
+    if (settings.ENVIRONMENT or "").strip().lower() == "production" and user.email.strip().lower() == "demo@echoquery.io":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo account registration is disabled in production."
+        )
+
     with distributed_lock(f"user_create_{user.email}", timeout=5) as acquired:
         if not acquired:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Concurrent registration lock active. Please try again.")
@@ -457,10 +490,9 @@ def get_job_status(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     
-    # Enforce ownership check if job has an owner and requester is not admin
-    if job.user_id is not None:
-        if current_user is None or (job.user_id != current_user.id and not current_user.is_superuser):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this job record")
+    # Enforce authentication and ownership/superuser authorization
+    if not can_access_job(job, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this job record")
     
     return {
         "job_id": job.id,
@@ -574,33 +606,66 @@ def simulate_dlq_failure(admin: models.User = Depends(require_admin), db: Sessio
     return {"message": "Simulated DLQ failure created", "job_id": failed_job.id}
 
 @app.post("/dlq/replay/{job_id}")
-def replay_dlq(job_id: int, background_tasks: BackgroundTasks, admin: models.User = Depends(require_admin)):
+def replay_dlq(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
     """Administrator-only: triggers replay of a DLQ job."""
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if not job.is_dlq:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Job is not in Dead Letter Queue")
+
     try:
-        background_tasks.add_task(execute_job_compute_logic, job_id)
+        if settings.ENVIRONMENT != "test" and is_broker_available():
+            replay_dlq_task.delay(job_id)
+        else:
+            job.status = "PENDING"
+            job.is_dlq = False
+            job.retry_count = 0
+            job.error_message = None
+            db.commit()
+            background_tasks.add_task(execute_job_compute_logic, job_id)
         return {"message": f"Job #{job_id} replay initiated from DLQ"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to dispatch replay task: {e}")
 
 @app.websocket("/ws/stream/{job_id}")
 async def websocket_stream_endpoint(
-    websocket: WebSocket, 
-    job_id: str, 
-    last_event_id: Optional[str] = Query(None)
+    websocket: WebSocket,
+    job_id: str,
+    last_event_id: Optional[str] = Query(None),
+    token: Optional[str] = Query(None),
 ):
+    raw_token = _extract_websocket_token(websocket, token)
+    numeric_id = int(job_id) if job_id.isdigit() else 0
+    if not raw_token or numeric_id <= 0:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    with SessionLocal() as db:
+        current_user = resolve_user_from_access_token(raw_token, db)
+        if not current_user:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        job = db.query(models.Job).filter(models.Job.id == numeric_id).first()
+        if not job or not can_access_job(job, current_user):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
     await manager.connect(websocket, job_id)
     try:
-        numeric_id = int(job_id) if job_id.isdigit() else 0
-        
         # 1. Replay historical stream events for reconnect catch-up
-        if numeric_id > 0:
-            history = fetch_stream_history(numeric_id, last_event_id=last_event_id)
-            for event in history:
-                await websocket.send_json(event)
+        history = fetch_stream_history(numeric_id, last_event_id=last_event_id)
+        for event in history:
+            await websocket.send_json(event)
 
         # 2. Redis Pub/Sub live subscriber with fallback
         client = get_redis_client()
-        if client and numeric_id > 0:
+        if client:
             pubsub = client.pubsub()
             pubsub.subscribe(f"job_events:{numeric_id}")
             try:
@@ -621,13 +686,15 @@ async def websocket_stream_endpoint(
         else:
             # Fallback simulated token stream for dev/test without live Redis
             sample_tokens = ["Analyzing", " audio", " payload...", " Processing", " AI", " transcription...", " Complete."]
-            for token in sample_tokens:
+            for token_text in sample_tokens:
                 await asyncio.sleep(0.05)
                 await websocket.send_json({
                     "event_type": "SUMMARY_DELTA",
                     "job_id": numeric_id,
-                    "data": {"token": token}
+                    "data": {"token": token_text}
                 })
 
     except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(websocket, job_id)

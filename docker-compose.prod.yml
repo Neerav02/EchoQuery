@@ -1,0 +1,199 @@
+services:
+
+  # 1. Reverse Proxy & Automated SSL (Only ports 80 & 443 are publicly accessible)
+  caddy:
+    image: caddy:2-alpine
+    container_name: echo_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:?DOMAIN_NAME environment variable is mandatory for production and cannot be empty}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+  # 2. API Gateway Service (No host port exposure, no dev bind mounts)
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: echo_api
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:-}@redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:-}@redis:6379/1}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://${RABBITMQ_DEFAULT_USER:-echo_broker_admin}:${RABBITMQ_DEFAULT_PASS:-}@broker:5672//}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-echo_prod_user}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-echo_prod_db}}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-echo_storage_admin}}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 3. Celery Auto-Scaling Worker (Concurrency 1 for 2 OCPU / 12 GB RAM budget)
+  worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: echo_worker
+    restart: unless-stopped
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=1
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:-}@redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:-}@redis:6379/1}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://${RABBITMQ_DEFAULT_USER:-echo_broker_admin}:${RABBITMQ_DEFAULT_PASS:-}@broker:5672//}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-echo_prod_user}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-echo_prod_db}}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-echo_storage_admin}}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 4. Interactive Real-Time Frontend (Streamlit)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: echo_frontend
+    restart: unless-stopped
+    expose:
+      - "8501"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      - API_URL=http://api:8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # 5. PostgreSQL Relational Database (Internal network only, persistent volume)
+  db:
+    image: postgres:15-alpine
+    container_name: echo_db
+    restart: unless-stopped
+    expose:
+      - "5432"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-echo_prod_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in .env.production}
+      POSTGRES_DB: ${POSTGRES_DB:-echo_prod_db}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-echo_prod_user} -d $${POSTGRES_DB:-echo_prod_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 6. Redis Distributed Lock & Cache Service (Internal network only, password authentication enforced)
+  redis:
+    image: redis:7-alpine
+    container_name: echo_redis
+    restart: unless-stopped
+    expose:
+      - "6379"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required in .env.production}
+    command: sh -c "exec redis-server --requirepass \"$$REDIS_PASSWORD\""
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - redis_data:/data
+
+  # 7. RabbitMQ Message Broker + DLQ (Internal network only, custom production credentials enforced)
+  broker:
+    image: rabbitmq:3.12-management-alpine
+    container_name: echo_broker
+    restart: unless-stopped
+    expose:
+      - "5672"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-echo_broker_admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?RABBITMQ_DEFAULT_PASS is required in .env.production}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # 8. Silo S3-Compatible Object Storage (Internal network only, custom production credentials enforced)
+  minio:
+    image: docker.io/pgsty/silo:RELEASE.2026-11-09T00-00-00Z
+    container_name: echo_minio
+    restart: unless-stopped
+    expose:
+      - "9000"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-echo_storage_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required in .env.production}
+    volumes:
+      - minio_data:/data
+    command: server /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

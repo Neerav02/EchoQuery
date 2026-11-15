@@ -1,0 +1,14 @@
+# EchoQuery v2.0 — Kilo Code Workspace Guardrails
+
+- Operating Mode: Ask before any file edit or shell execution (`read`-safe configuration enforced in `.kilo/kilo.jsonc`).
+- Secret Protection: Never read, echo, or commit `.env`, `.env.*`, credentials, JWTs, or database passwords.
+- Data & Migration Integrity:
+  - Do NOT drop, reset, or overwrite PostgreSQL tables (`users`, `jobs`, `refresh_tokens`, `outbox_tasks`).
+  - Preserve Alembic revision `23a242a11396` (head) and historical seed records (`User #1`, `Jobs #1-#3`).
+- Agent Coordination:
+  - Do NOT launch automated loops (Ralph Loop) or competing automated review/refactor agents (`CodeRabbit`) against modified workspace files.
+- Runtime Environment:
+  - Python interpreter: `D:\echoquery\venv\Scripts\python.exe`
+  - Backend API: `http://127.0.0.1:8000`
+  - Frontend UI: `http://127.0.0.1:8501`
+

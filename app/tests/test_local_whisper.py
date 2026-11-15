@@ -89,3 +89,17 @@ def test_local_whisper_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         provider.transcribe_and_analyze("/non/existent/path/to/missing_file.wav")
 
+def test_local_whisper_real_speech_inference():
+    fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "sample_speech.wav")
+    if not os.path.exists(fixture_path):
+        pytest.skip("sample_speech.wav fixture not found")
+
+    provider = LocalWhisperProvider(model_size="tiny", device="cpu")
+    assert provider.is_healthy() is True
+
+    result = provider.transcribe_and_analyze(fixture_path)
+    assert isinstance(result, AIResult)
+    assert result.provider == "local_whisper"
+    assert result.latency_ms > 0
+    assert result.summary is not None
+

@@ -24,6 +24,17 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 def get_url():
+    # 1. Check for -x db_url=... passed via CLI
+    x_args = context.get_x_argument(as_dictionary=True)
+    if "db_url" in x_args and x_args["db_url"]:
+        return x_args["db_url"]
+
+    # 2. Check for programmatic override via config.set_main_option("sqlalchemy.url", ...)
+    custom_url = config.get_main_option("sqlalchemy.url")
+    if custom_url and not custom_url.startswith("driver://"):
+        return custom_url
+
+    # 3. Default to effective application database URL
     return settings.effective_database_url
 
 def run_migrations_offline() -> None:

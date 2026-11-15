@@ -4,9 +4,12 @@ import json
 import time
 from fastapi.testclient import TestClient
 
+import models
+from database import SessionLocal
 from main import app
 from events import publish_job_event, fetch_stream_history
 from email_service import generate_executive_email_html, send_job_completion_email
+from security import hash_password, create_access_token
 
 # ==========================================
 # 1. Real-Time Event & Stream Persistence Tests
@@ -64,11 +67,38 @@ def test_stream_reconnect_catch_up():
 # ==========================================
 
 def test_websocket_stream_receives_events():
-    job_id = 903
+    db = SessionLocal()
+    owner = models.User(
+        email="stream_owner@echoquery.io",
+        hashed_password=hash_password("StreamPass123!"),
+        is_superuser=False,
+        password_migrated=True,
+    )
+    db.add(owner)
+    db.commit()
+    db.refresh(owner)
+
+    job = models.Job(
+        user_id=owner.id,
+        filename="stream_test.mp3",
+        storage_name="stream-test-storage",
+        status="PROCESSING",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    job_id = job.id
+    owner_id = owner.id
+    db.close()
+
+    token, _ = create_access_token({"sub": str(owner_id), "email": "stream_owner@echoquery.io"})
     publish_job_event(job_id, "TRANSCRIPT_SEGMENT", {"start_sec": 0.0, "end_sec": 5.0, "text": "Stream segment test."})
 
     with TestClient(app) as client:
-        with client.websocket_connect(f"/ws/stream/{job_id}") as ws:
+        with client.websocket_connect(
+            f"/ws/stream/{job_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
             first_msg = ws.receive_json()
             assert "event_type" in first_msg or "data" in first_msg
 

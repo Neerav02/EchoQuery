@@ -3,7 +3,13 @@ import streamlit as st
 import requests
 import time
 
-default_api = os.getenv("API_URL", "http://localhost:8000")
+st.set_page_config(
+    page_title="EchoQuery Enterprise Engine", 
+    page_icon="⚡", 
+    layout="wide"
+)
+
+default_api = os.getenv("API_URL", "http://127.0.0.1:8000")
 API_URL = st.sidebar.text_input("⚡ API Engine URL", default_api)
 
 if "auth_token" not in st.session_state:
@@ -16,16 +22,35 @@ def get_auth_headers():
         return {"Authorization": f"Bearer {token}"}
     return {}
 
+is_production = os.getenv("ENVIRONMENT", "").strip().lower() == "production"
+demo_env = os.getenv("ENABLE_DEMO_LOGIN", "").strip().lower()
+if demo_env in ("false", "0", "no"):
+    allow_demo = False
+elif demo_env in ("true", "1", "yes"):
+    allow_demo = True
+else:
+    allow_demo = not is_production
+
 st.sidebar.divider()
 st.sidebar.subheader("🔐 Access & Authentication")
 if not st.session_state["auth_token"]:
-    with st.sidebar.expander("Sign In / Demo Login", expanded=True):
-        email_inp = st.text_input("Email", "admin@echoquery.io")
-        pass_inp = st.text_input("Password", "AdminPass123!", type="password")
-        col_b1, col_b2 = st.columns(2)
-        if col_b1.button("🔑 Login"):
+    expander_title = "Sign In / Demo Login" if allow_demo else "Sign In"
+    with st.sidebar.expander(expander_title, expanded=True):
+        default_email = "admin@echoquery.io" if allow_demo else ""
+        email_inp = st.text_input("Email", default_email, placeholder="Enter email")
+        pass_inp = st.text_input("Password", "", placeholder="Enter password", type="password")
+        
+        if allow_demo:
+            col_b1, col_b2 = st.columns(2)
+            login_clicked = col_b1.button("🔑 Login")
+            demo_clicked = col_b2.button("✨ Demo")
+        else:
+            login_clicked = st.button("🔑 Login")
+            demo_clicked = False
+
+        if login_clicked:
             try:
-                res = requests.post(f"{API_URL}/auth/token", data={"username": email_inp, "password": pass_inp})
+                res = requests.post(f"{API_URL}/auth/token", data={"username": email_inp, "password": pass_inp}, timeout=5)
                 if res.status_code == 200:
                     st.session_state["auth_token"] = res.json()["access_token"]
                     st.session_state["user_email"] = email_inp
@@ -35,29 +60,30 @@ if not st.session_state["auth_token"]:
                     st.error("Invalid credentials")
             except Exception as e:
                 st.error(f"Auth error: {e}")
-        if col_b2.button("✨ Demo"):
+
+        if demo_clicked:
             try:
-                requests.post(f"{API_URL}/users/", json={"email": "demo@echoquery.io", "password": "DemoPassword123!"})
-                res = requests.post(f"{API_URL}/auth/token", data={"username": "demo@echoquery.io", "password": "DemoPassword123!"})
+                requests.post(f"{API_URL}/users/", json={"email": "demo@echoquery.io", "password": "DemoPassword123!"}, timeout=5)
+                res = requests.post(f"{API_URL}/auth/token", data={"username": "demo@echoquery.io", "password": "DemoPassword123!"}, timeout=5)
                 if res.status_code == 200:
                     st.session_state["auth_token"] = res.json()["access_token"]
                     st.session_state["user_email"] = "demo@echoquery.io"
                     st.success("Demo user active!")
                     st.rerun()
+                else:
+                    st.error(f"Demo login failed ({res.status_code})")
             except Exception as e:
                 st.error(f"Demo login error: {e}")
 else:
     st.sidebar.success(f"Signed in as: **{st.session_state['user_email']}**")
     if st.sidebar.button("🚪 Logout"):
+        try:
+            requests.post(f"{API_URL}/auth/logout", headers=get_auth_headers(), timeout=2)
+        except Exception:
+            pass
         st.session_state["auth_token"] = None
         st.session_state["user_email"] = None
         st.rerun()
-
-st.set_page_config(
-    page_title="EchoQuery Enterprise Engine", 
-    page_icon="⚡", 
-    layout="wide"
-)
 
 # Custom CSS for high-tech premium aesthetics
 st.markdown("""
@@ -147,14 +173,14 @@ with tab_dispatch:
             status_box = st.empty()
             progress_bar = st.progress(0)
             
-            files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
+            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
             data = {}
             if user_email:
                 data["email"] = user_email
                 
             try:
                 start_time = time.time()
-                res = requests.post(f"{API_URL}/upload/", files=files, data=data, headers=get_auth_headers())
+                res = requests.post(f"{API_URL}/upload/", files=files, data=data, headers=get_auth_headers(), timeout=15)
                 
                 if res.status_code == 401:
                     status_box.error("🔐 Authentication Required: Please sign in or click '✨ Demo' in the sidebar.")
@@ -163,11 +189,12 @@ with tab_dispatch:
                     status_box.info(f"🔄 Task Dispatch Active! Job reference: #{job_id}")
                     
                     completed = False
+                    failed = False
                     for step in range(1, 101):
                         time.sleep(0.04)
                         progress_bar.progress(step)
                         
-                        jres = requests.get(f"{API_URL}/jobs/{job_id}", headers=get_auth_headers())
+                        jres = requests.get(f"{API_URL}/jobs/{job_id}", headers=get_auth_headers(), timeout=5)
                         if jres.status_code == 200:
                             jdata = jres.json()
                             if jdata["status"] == "COMPLETED":
@@ -195,10 +222,17 @@ with tab_dispatch:
                                         st.warning(f"📩 Executive HTML Email report sent to: **{user_email}**")
                                 break
                             elif jdata["status"] in ["FAILED", "DEAD_LETTER"]:
+                                failed = True
                                 status_box.error(f"❌ Task Failed: {jdata.get('error_message')}")
                                 break
-                    if not completed:
+                        elif jres.status_code in (401, 403, 404):
+                            failed = True
+                            status_box.error(f"❌ Job polling error ({jres.status_code})")
+                            break
+                    if not completed and not failed:
                         status_box.warning("Task is continuing background execution...")
+                else:
+                    status_box.error(f"Upload failed ({res.status_code}): {res.text}")
             except Exception as e:
                 st.error(f"Connection Error: {e}")
 
@@ -225,12 +259,14 @@ with tab_dlq:
     with col_dlq1:
         if st.button("🚨 Simulate Corrupted Task & Send to DLQ", type="secondary"):
             try:
-                sf = requests.post(f"{API_URL}/dlq/simulate-failure", headers=get_auth_headers())
+                sf = requests.post(f"{API_URL}/dlq/simulate-failure", headers=get_auth_headers(), timeout=5)
                 if sf.status_code == 200:
                     st.warning(f"⚠️ Corrupted Task routed to DLQ! Refreshed fault counter.")
                     st.rerun()
                 elif sf.status_code in (401, 403):
                     st.error("Admin credentials required to simulate DLQ failure.")
+                else:
+                    st.error(f"Simulation failed ({sf.status_code})")
             except Exception as e:
                 st.error(f"Simulation failed: {e}")
 
@@ -239,7 +275,7 @@ with tab_dlq:
             st.rerun()
 
     try:
-        dlq_res = requests.get(f"{API_URL}/dlq/jobs", headers=get_auth_headers())
+        dlq_res = requests.get(f"{API_URL}/dlq/jobs", headers=get_auth_headers(), timeout=5)
         if dlq_res.status_code == 200:
             jobs = dlq_res.json()
             if not jobs:
@@ -250,10 +286,13 @@ with tab_dlq:
                         st.error(f"**Error Details:** {j['error_message']}")
                         st.write(f"**Retries Attempted:** {j['retry_count']}")
                         if st.button(f"⚡ Replay & Self-Heal Task #{j['job_id']}", key=f"dlq_{j['job_id']}"):
-                            requests.post(f"{API_URL}/dlq/replay/{j['job_id']}", headers=get_auth_headers())
-                            st.success(f"Self-Healing Replay initiated for Job #{j['job_id']}")
-                            time.sleep(1)
-                            st.rerun()
+                            rep_res = requests.post(f"{API_URL}/dlq/replay/{j['job_id']}", headers=get_auth_headers(), timeout=5)
+                            if rep_res.status_code == 200:
+                                st.success(f"Self-Healing Replay initiated for Job #{j['job_id']}")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(f"Replay failed ({rep_res.status_code})")
         elif dlq_res.status_code in (401, 403):
             st.info("🔐 Admin authorization required to view DLQ. Please sign in as administrator in the sidebar.")
     except Exception as e:

@@ -97,3 +97,4 @@ app/tests/test_storage_outbox.py ........                        [100%]
 b3135b7 feat(phase-2): complete minio streaming storage, transactional outbox durable dispatch, idempotency, and atomic worker lock claims
 1d3fdaf feat(phase-1): complete production security foundation with bcrypt, jwt auth, alembic migrations, rate limiting, and test suite
 ```
+
